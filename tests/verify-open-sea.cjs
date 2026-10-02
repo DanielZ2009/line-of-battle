@@ -90,6 +90,43 @@ check('Adjacent flagship losses transfer control to the first surviving ship', (
   assert.equal(f.ships[0].id, promoted.id); auditMotion(b, 18);
   assert.ok(distance(promoted, before) > 200, 'promoted third ship remained jammed');
 });
+check('Curved-wake strike bypass preserves endpoint poses and remapped wake coordinates', () => {
+  const b = fixture(), f = b.fleets[0]; curved(f);
+  const victim = f.ships[2], rear = f.ships[3], beforeRear = { x: rear.x, y: rear.y };
+  const poses = new Map(f.ships.map(s => [s.id, { x: s.x, y: s.y, a: s.a }]));
+  victim.crew = 10; b.removeSunk();
+  for (const s of f.ships) {
+    assert.equal(distance(s, poses.get(s.id)), 0, 'bypass moved a live ship while remapping its coordinate');
+    assert.ok(Math.abs(angle(s.a - poses.get(s.id).a)) < 1e-9, 'bypass changed an endpoint heading');
+    assert.ok(distance(s, sample(f.path, s.s)) < .002, 'ship no longer matches its remapped wake coordinate');
+  }
+  auditMotion(b, 18);
+  assert.ok(distance(rear, beforeRear) > 200, 'curved strike bypass left a follower stalled');
+  assert.ok(b.wrecks.some(w => w.id === victim.id && !w.sunk));
+});
+check('A second strike during reforming keeps endpoints fixed and permits the remaining rear to recover', () => {
+  const b = fixture(), f = b.fleets[0]; f.ships[2].crew = 10; b.removeSunk(); auditMotion(b, 4);
+  const secondVictim = f.ships[2], rear = f.ships[3], beforeRear = { x: rear.x, y: rear.y };
+  const poses = new Map(f.ships.map(s => [s.id, { x: s.x, y: s.y, a: s.a }]));
+  secondVictim.crew = 10; b.removeSunk();
+  for (const s of f.ships) {
+    assert.equal(distance(s, poses.get(s.id)), 0, 'second bypass moved a live endpoint');
+    assert.ok(distance(s, sample(f.path, s.s)) < .002, 'second splice lost coordinate consistency');
+  }
+  auditMotion(b, 18);
+  assert.ok(distance(rear, beforeRear) > 200, 'second strike permanently trapped the remaining rear');
+  assert.equal(b.wrecks.filter(w => !w.sunk).length, 2);
+});
+check('A temporarily blocked bypass is retried after the available sea lane clears', () => {
+  const b = fixture(), f = b.fleets[0], rear = f.ships[3], start = { x: rear.x, y: rear.y };
+  const blockers = b.fleets[1].ships.slice(0, 2), original = blockers.map(s => ({ x: s.x, y: s.y, a: s.a }));
+  Object.assign(blockers[0], { x: 530, y: 735, a: Math.PI / 2, speed: 0 });
+  Object.assign(blockers[1], { x: 530, y: 645, a: Math.PI / 2, speed: 0 });
+  f.ships[2].crew = 10; b.removeSunk(); auditMotion(b, 4);
+  blockers.forEach((s, i) => Object.assign(s, original[i])); auditMotion(b, 18);
+  assert.ok(distance(rear, start) > 200, 'cleared bypass was never retried; rear made ' + distance(rear, start).toFixed(1) + ' metres');
+  assert.ok(rear.x > 590, 'rear failed to pass the retained struck hull after sea lane cleared');
+});
 check('Old left, right and bottom screen edges impose no hull wall', () => {
   for (const [x, y, a, outside] of [
     [1750, 800, 0, s => s.x > C.width + 80],

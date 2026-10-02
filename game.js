@@ -65,14 +65,16 @@
   // Replace only an empty interval of the wake. Live ships keep exactly their
   // world poses; arc coordinates ahead are remapped by the extra route length.
   bypassGap(f,behind,ahead){
-   const lo=behind.s,hi=ahead.s,span=hi-lo;if(span<90)return false;
-   const blocked=this.wrecks.filter(w=>!w.sunk&&w.fleet===f.id&&w.s>lo&&w.s<hi&&distance(w,sample(f.path,w.s))<65);if(!blocked.length)return false;
+   const lo=behind.s;
+   const blocked=this.wrecks.filter(w=>!w.sunk&&w.fleet===f.id&&w.s>lo&&w.s<ahead.s&&distance(w,sample(f.path,w.s))<65);if(!blocked.length)return true;
+   const first=Math.min(...blocked.map(w=>w.s)),last=Math.max(...blocked.map(w=>w.s)),hi=Math.min(ahead.s,last+220),span=hi-lo;if(span<90)return false;
    const start=sample(f.path,lo),end=sample(f.path,hi),dx=end.x-start.x,dy=end.y-start.y,len=Math.hypot(dx,dy)||1,nx=-dy/len,ny=dx/len;
    const lee=ny>=0?1:-1;let route=null;
-   search:for(const sign of [lee,-lee])for(const h of [Math.max(25,span*.12),Math.max(38,span*.18),Math.max(60,span*.28)]){
+   search:for(const sign of [lee,-lee])for(const h of [25,38,65,100]){
     const points=[],steps=Math.ceil(span/2);let arc=lo,previous=null;
-    for(let k=0;k<=steps;k++){const t=k/steps,p=sample(f.path,lo+span*t),offset=sign*h*Math.sin(Math.PI*t)**2,q={x:p.x+nx*offset,y:p.y+ny*offset};if(previous)arc+=distance(previous,q);q.s=arc;q.a=previous?Math.atan2(q.y-previous.y,q.x-previous.x):behind.a;points.push(q);previous=q;}
-    if(points.every(p=>this.obstacles().every(o=>o.id===behind.id||o.id===ahead.id||!overlaps(p,o)))){route=points;break search;}
+    const rise=Math.max(30,first-lo-30),fall=Math.min(span-30,last-lo+30);
+    for(let k=0;k<=steps;k++){const progress=span*k/steps,p=sample(f.path,lo+progress),shape=progress<rise?Math.sin(Math.PI*progress/(2*rise))**2:progress>fall?Math.cos(Math.PI*(progress-fall)/(2*(span-fall)))**2:1,offset=sign*h*shape,q={x:p.x+nx*offset,y:p.y+ny*offset};if(previous)arc+=distance(previous,q);q.s=arc;q.a=previous?Math.atan2(q.y-previous.y,q.x-previous.x):behind.a;points.push(q);previous=q;}
+    if(points.every(p=>polar(p.a)>.02&&this.obstacles().every(o=>o.id===behind.id||o.id===ahead.id||!overlaps(p,o)))){route=points;break search;}
    }
    if(!route)return false;const delta=route[route.length-1].s-hi;
    f.path=[...f.path.filter(p=>p.s<lo),...route,...f.path.filter(p=>p.s>hi).map(p=>({...p,s:p.s+delta}))];
@@ -138,12 +140,14 @@
    a.fouled=Math.max(a.fouled,12);b.fouled=Math.max(b.fouled||0,12);
    // Backing topsails is an automatic crew response to clear a fouled bow.
    // Reverse only along the ship's own wake, preserving the line's geometry.
-   for(const s of [a,b])if(this.fleets[s.fleet]?.ships[0]===s&&!s.struck)s.backing=35;
+   for(const s of [a,b])if(!s.struck&&(this.fleets[s.fleet]?.ships[0]===s||(a.struck||b.struck)))s.backing=35;
    for(const s of [a,b])if(!s.struck){s.rigging=Math.max(0,s.rigging-2-relative);s.hp-=relative*.6;}
    this.emit('Hull contact: ships checked and rigging fouled. Steer clear.');this.effects.push({kind:'contact',x:(a.x+b.x)/2,y:(a.y+b.y)/2,life:12,max:12});
   }
   moveFleet(f,dt){
-   if(!f.ships.length)return;const obstacles=this.obstacles();
+   if(!f.ships.length)return;
+   if(f.pendingBypasses?.size&&this.time>=(f.nextBypass||0)){f.nextBypass=this.time+2;for(const id of f.pendingBypasses){const i=f.ships.findIndex(s=>s.id===id);if(i<=0||this.bypassGap(f,f.ships[i],f.ships[i-1])){f.pendingBypasses.delete(id);if(i>0)f.ships[i].backing=0;}}}
+   const obstacles=this.obstacles();
    for(let i=0;i<f.ships.length;i++){
     const s=f.ships[i];for(const side of [0,1]){s.cool[side]=Math.max(0,s.cool[side]-dt);s.flash[side]=Math.max(0,s.flash[side]-dt);}s.fouled=Math.max(0,s.fouled-dt);
     const old={x:s.x,y:s.y,a:s.a,s:s.s,speed:s.speed};
@@ -173,9 +177,12 @@
      const limit=f.ships[i-1].s-C.gap;
      // When the flagship backs, the following ships back along their own wake
      // too, rather than compressing the line into the flagship's stern.
-     advance=limit<s.s?Math.max(-.65*dt,limit-s.s):Math.max(0,Math.min(speed*dt,limit-s.s));
+     if(s.backing>0){s.backing=Math.max(0,s.backing-dt);advance=-.65*dt;}
+     else advance=limit<s.s?Math.max(-.65*dt,limit-s.s):Math.max(0,Math.min(speed*dt,limit-s.s));
      if(advance<speed*dt*.2)speed=advance/dt;
      proposal=sample(f.path,s.s+advance);
+     const yaw=C.turnRate*(.12+.88*clamp(Math.abs(speed)/2.8,0,1))*(.2+.8*s.rudder/100)*dt,delta=angle(proposal.a-s.a);
+     if(advance>=0)proposal.a=angle(s.a+clamp(delta,-yaw,yaw));
     }
     const blocker=obstacles.find(other=>other.id!==s.id&&overlaps(proposal,other));
     if(blocker){this.contact(s,blocker);s.speed=0;}
@@ -195,7 +202,7 @@
     for(const s of lost){const sunk=s.hp<=0;this.emit((f.id===0?'Blue':'Red')+' ship '+s.id.split('-')[1]+(sunk?' sinks.':' strikes its colours.'));this.wrecks.push({...s,speed:0,struck:true,sunk});this.effects.push({kind:sunk?'sink':'strike',x:s.x,y:s.y,a:s.a,life:36,max:36});}
     f.ships=f.ships.filter(s=>s.hp>0&&s.crew>18);
     if(head&&lost.includes(head)&&f.ships.length){const s=f.ships[0];f.x=s.x;f.y=s.y;f.a=s.a;f.s=s.s;f.path=f.path.filter(p=>p.s<s.s);f.path.push({x:s.x,y:s.y,a:s.a,s:s.s});f.avoid=null;f.recovery=null;s.backing=0;this.emit((f.id?'Red':'Blue')+' ship '+s.id.split('-')[1]+' takes command.');}
-    if(lost.length)for(let i=1;i<f.ships.length;i++)this.bypassGap(f,f.ships[i],f.ships[i-1]);
+    if(lost.length)for(let i=1;i<f.ships.length;i++)if(!this.bypassGap(f,f.ships[i],f.ships[i-1])){f.pendingBypasses??=new Set();f.pendingBypasses.add(f.ships[i].id);}
    }
    if(this.fleets.some(f=>!f.ships.length)){this.state='finished';this.winner=this.fleets.every(f=>!f.ships.length)?'draw':(this.fleets[0].ships.length?0:1);this.reason='fleet-defeated';this.emit(this.winner==='draw'?'Both fleets are out of action.':(this.winner===0?'Blue':'Red')+' wins the battle.');}
   }
